@@ -1,0 +1,792 @@
+// ==========================================================================
+// LaundryOS — Prisma Schema
+// Covers: multi-role auth, branches, orders/lifecycle, drivers, staff/inventory,
+// payments/wallet/loyalty/coupons, reviews, notifications, audit logs, reports.
+// ==========================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --------------------------------------------------------------------------
+// ENUMS
+// --------------------------------------------------------------------------
+
+enum Role {
+  CUSTOMER
+  DRIVER
+  STAFF
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum OrderStatus {
+  PENDING
+  DRIVER_ASSIGNED
+  DRIVER_EN_ROUTE_PICKUP
+  PICKUP_COMPLETED
+  RECEIVED_AT_BRANCH
+  WASHING
+  DRYING
+  IRONING
+  QUALITY_CHECK
+  READY_FOR_DELIVERY
+  OUT_FOR_DELIVERY
+  DELIVERED
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  STRIPE_CARD
+  CASH_ON_DELIVERY
+  GCASH
+  MAYA
+  WALLET
+}
+
+enum PaymentStatus {
+  PENDING
+  AUTHORIZED
+  PAID
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum PricingModel {
+  PER_KG
+  PER_ITEM
+  CUSTOM
+}
+
+enum VehicleType {
+  MOTORCYCLE
+  CAR
+  VAN
+  TRUCK
+}
+
+enum MachineType {
+  WASHER
+  DRYER
+  IRON_STATION
+}
+
+enum MachineStatus {
+  AVAILABLE
+  IN_USE
+  MAINTENANCE
+  OUT_OF_SERVICE
+}
+
+enum NotificationChannel {
+  EMAIL
+  SMS
+  PUSH
+  IN_APP
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum WalletTxType {
+  CREDIT
+  DEBIT
+}
+
+enum LoyaltyTxType {
+  EARNED
+  REDEEMED
+  EXPIRED
+  ADJUSTED
+}
+
+enum CouponType {
+  PERCENTAGE
+  FIXED_AMOUNT
+  FREE_DELIVERY
+}
+
+enum SupportTicketStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum RefundStatus {
+  REQUESTED
+  APPROVED
+  REJECTED
+  PROCESSED
+}
+
+// --------------------------------------------------------------------------
+// AUTH / USERS
+// --------------------------------------------------------------------------
+
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  emailVerified     DateTime?
+  phone             String?   @unique
+  phoneVerified     Boolean   @default(false)
+  passwordHash      String? // null when using social login only
+  firstName         String
+  lastName          String
+  avatarUrl         String?
+  role              Role      @default(CUSTOMER)
+  isActive          Boolean   @default(true)
+  isSuspended       Boolean   @default(false)
+  referralCode      String    @unique @default(cuid())
+  referredById      String?
+  referredBy        User?     @relation("Referrals", fields: [referredById], references: [id])
+  referrals         User[]    @relation("Referrals")
+  twoFactorEnabled  Boolean   @default(false)
+  twoFactorSecret   String?
+  lastLoginAt       DateTime?
+  lastLoginIp       String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  accounts          Account[]
+  sessions          Session[]
+  addresses         Address[]
+  orders            Order[]           @relation("CustomerOrders")
+  driverProfile     Driver?
+  staffProfile      Staff?
+  wallet            Wallet?
+  loyaltyAccount    LoyaltyAccount?
+  reviews           Review[]          @relation("ReviewAuthor")
+  notifications     Notification[]
+  supportTickets    SupportTicket[]   @relation("TicketRequester")
+  auditLogs         AuditLog[]
+  passwordResetTokens PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
+
+  @@index([role])
+  @@index([email])
+}
+
+// NextAuth-compatible tables
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Address {
+  id           String   @id @default(cuid())
+  userId       String
+  label        String // "Home", "Office"
+  line1        String
+  line2        String?
+  city         String
+  province      String?
+  postalCode   String?
+  country      String   @default("PH")
+  latitude     Float
+  longitude    Float
+  isDefault    Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pickupOrders   Order[] @relation("PickupAddress")
+  deliveryOrders Order[] @relation("DeliveryAddress")
+
+  @@index([userId])
+}
+
+// --------------------------------------------------------------------------
+// BRANCHES / ZONES / MACHINES
+// --------------------------------------------------------------------------
+
+model Branch {
+  id             String   @id @default(cuid())
+  name           String
+  code           String   @unique
+  addressLine    String
+  city           String
+  latitude       Float
+  longitude      Float
+  deliveryRadiusKm Float  @default(10)
+  phone          String?
+  email          String?
+  isActive       Boolean  @default(true)
+  businessHours  Json // { mon: {open, close}, ... }
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  orders         Order[]
+  machines       Machine[]
+  employees      Staff[]
+  drivers        Driver[]
+  inventoryItems InventoryItem[]
+  serviceZones   ServiceZone[]
+  holidays       Holiday[]
+
+  @@index([city])
+}
+
+model ServiceZone {
+  id        String  @id @default(cuid())
+  branchId  String
+  name      String
+  polygon   Json // GeoJSON polygon of coverage area
+  deliveryFee Decimal @db.Decimal(10, 2) @default(0)
+  isActive  Boolean @default(true)
+
+  branch    Branch  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([branchId])
+}
+
+model Holiday {
+  id        String   @id @default(cuid())
+  branchId  String
+  date      DateTime
+  name      String
+  isClosed  Boolean  @default(true)
+
+  branch    Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([branchId, date])
+}
+
+model Machine {
+  id          String        @id @default(cuid())
+  branchId    String
+  code        String
+  type        MachineType
+  status      MachineStatus @default(AVAILABLE)
+  capacityKg  Float?
+  lastServiceAt DateTime?
+  createdAt   DateTime      @default(now())
+
+  branch      Branch        @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  assignments MachineAssignment[]
+
+  @@unique([branchId, code])
+}
+
+model MachineAssignment {
+  id         String   @id @default(cuid())
+  machineId  String
+  orderId    String
+  startedAt  DateTime @default(now())
+  endedAt    DateTime?
+
+  machine    Machine  @relation(fields: [machineId], references: [id], onDelete: Cascade)
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([machineId])
+  @@index([orderId])
+}
+
+// --------------------------------------------------------------------------
+// STAFF / DRIVER / VEHICLE
+// --------------------------------------------------------------------------
+
+model Staff {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  branchId      String
+  employeeCode  String   @unique
+  position      String
+  hiredAt       DateTime @default(now())
+  isActive      Boolean  @default(true)
+
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch        Branch   @relation(fields: [branchId], references: [id])
+  shifts        Shift[]
+
+  @@index([branchId])
+}
+
+model Shift {
+  id        String   @id @default(cuid())
+  staffId   String
+  startAt   DateTime
+  endAt     DateTime
+  createdAt DateTime @default(now())
+
+  staff     Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@index([staffId])
+}
+
+model Driver {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  branchId        String?
+  licenseNumber   String   @unique
+  isAvailable     Boolean  @default(false)
+  currentLatitude  Float?
+  currentLongitude Float?
+  lastLocationAt  DateTime?
+  ratingAvg       Float    @default(0)
+  ratingCount     Int      @default(0)
+  isVerified      Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branch          Branch?  @relation(fields: [branchId], references: [id])
+  vehicles        Vehicle[]
+  orders          Order[]  @relation("DriverOrders")
+  earnings        DriverEarning[]
+
+  @@index([branchId])
+  @@index([isAvailable])
+}
+
+model Vehicle {
+  id           String      @id @default(cuid())
+  driverId     String
+  type         VehicleType
+  plateNumber  String      @unique
+  model        String?
+  color        String?
+  isActive     Boolean     @default(true)
+
+  driver       Driver      @relation(fields: [driverId], references: [id], onDelete: Cascade)
+
+  @@index([driverId])
+}
+
+model DriverEarning {
+  id        String   @id @default(cuid())
+  driverId  String
+  orderId   String   @unique
+  amount    Decimal  @db.Decimal(10, 2)
+  payoutAt  DateTime?
+  createdAt DateTime @default(now())
+
+  driver    Driver   @relation(fields: [driverId], references: [id], onDelete: Cascade)
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([driverId])
+}
+
+// --------------------------------------------------------------------------
+// SERVICES / PRICING
+// --------------------------------------------------------------------------
+
+model Service {
+  id           String       @id @default(cuid())
+  name         String // "Wash & Fold", "Dry Cleaning", etc.
+  slug         String       @unique
+  description  String?
+  pricingModel PricingModel
+  basePrice    Decimal      @db.Decimal(10, 2)
+  unit         String? // "kg", "item"
+  isActive     Boolean      @default(true)
+  iconUrl      String?
+  createdAt    DateTime     @default(now())
+
+  orderItems   OrderItem[]
+}
+
+model ExtraOption {
+  id         String   @id @default(cuid())
+  name       String // "Express Service", "Same Day Delivery", "Fragrance"
+  slug       String   @unique
+  extraPrice Decimal  @db.Decimal(10, 2) @default(0)
+  isActive   Boolean  @default(true)
+
+  orderExtras OrderExtra[]
+}
+
+model PricingRule {
+  // supports peak-hour / surge pricing multipliers
+  id          String   @id @default(cuid())
+  name        String
+  branchId    String?
+  multiplier  Float    @default(1.0)
+  startTime   String // "17:00"
+  endTime     String // "20:00"
+  daysOfWeek  Int[] // 0-6
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+}
+
+// --------------------------------------------------------------------------
+// ORDERS
+// --------------------------------------------------------------------------
+
+model Order {
+  id                String        @id @default(cuid())
+  orderNumber       String        @unique @default(cuid())
+  customerId        String
+  branchId          String
+  driverId          String?
+
+  pickupAddressId   String
+  deliveryAddressId String
+  pickupDate        DateTime
+  pickupTimeSlot    String // "09:00-11:00"
+  deliveryDate      DateTime?
+  deliveryTimeSlot  String?
+
+  status            OrderStatus   @default(PENDING)
+  specialInstructions String?
+  photoUrls         String[]      @default([])
+
+  subtotal          Decimal       @db.Decimal(10, 2)
+  deliveryFee       Decimal       @db.Decimal(10, 2) @default(0)
+  taxAmount         Decimal       @db.Decimal(10, 2) @default(0)
+  discountAmount     Decimal      @db.Decimal(10, 2) @default(0)
+  totalAmount       Decimal       @db.Decimal(10, 2)
+
+  weightKg          Float?
+  qrCode            String?       @unique
+
+  couponId          String?
+
+  otpPickup         String?
+  otpDelivery       String?
+  pickupSignatureUrl   String?
+  deliverySignatureUrl String?
+
+  cancelledAt       DateTime?
+  cancelReason       String?
+
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  customer          User          @relation("CustomerOrders", fields: [customerId], references: [id])
+  branch            Branch        @relation(fields: [branchId], references: [id])
+  driver            Driver?       @relation("DriverOrders", fields: [driverId], references: [id])
+  pickupAddress     Address       @relation("PickupAddress", fields: [pickupAddressId], references: [id])
+  deliveryAddress   Address       @relation("DeliveryAddress", fields: [deliveryAddressId], references: [id])
+  coupon            Coupon?       @relation(fields: [couponId], references: [id])
+
+  items             OrderItem[]
+  extras            OrderExtra[]
+  statusHistory     OrderStatusEvent[]
+  payment           Payment?
+  review            Review?
+  machineAssignments MachineAssignment[]
+  driverEarning     DriverEarning?
+  qualityChecklist  QualityCheck[]
+  refund            Refund?
+
+  @@index([customerId])
+  @@index([branchId])
+  @@index([driverId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id        String   @id @default(cuid())
+  orderId   String
+  serviceId String
+  quantity  Float // kg or item count
+  unitPrice Decimal  @db.Decimal(10, 2)
+  lineTotal Decimal  @db.Decimal(10, 2)
+
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  service   Service  @relation(fields: [serviceId], references: [id])
+
+  @@index([orderId])
+}
+
+model OrderExtra {
+  id            String      @id @default(cuid())
+  orderId       String
+  extraOptionId String
+  price         Decimal     @db.Decimal(10, 2)
+
+  order         Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  extraOption   ExtraOption @relation(fields: [extraOptionId], references: [id])
+
+  @@index([orderId])
+}
+
+model OrderStatusEvent {
+  id        String      @id @default(cuid())
+  orderId   String
+  status    OrderStatus
+  note      String?
+  actorId   String? // user who triggered the change
+  createdAt DateTime    @default(now())
+
+  order     Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
+
+model QualityCheck {
+  id          String   @id @default(cuid())
+  orderId     String
+  checklist   Json // [{item, passed, note}]
+  passed      Boolean
+  checkedById String?
+  createdAt   DateTime @default(now())
+
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+}
+
+// --------------------------------------------------------------------------
+// PAYMENTS / WALLET / LOYALTY / COUPONS
+// --------------------------------------------------------------------------
+
+model Payment {
+  id              String        @id @default(cuid())
+  orderId         String        @unique
+  method          PaymentMethod
+  status          PaymentStatus @default(PENDING)
+  amount          Decimal       @db.Decimal(10, 2)
+  currency        String        @default("PHP")
+  stripePaymentIntentId String?
+  providerRef     String? // GCash/Maya reference
+  paidAt          DateTime?
+  createdAt       DateTime      @default(now())
+
+  order           Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+model Refund {
+  id          String       @id @default(cuid())
+  orderId     String       @unique
+  amount      Decimal      @db.Decimal(10, 2)
+  reason      String
+  status      RefundStatus @default(REQUESTED)
+  processedById String?
+  processedAt DateTime?
+  createdAt   DateTime     @default(now())
+
+  order       Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+model Wallet {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  balance   Decimal  @db.Decimal(10, 2) @default(0)
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions WalletTransaction[]
+}
+
+model WalletTransaction {
+  id        String       @id @default(cuid())
+  walletId  String
+  type      WalletTxType
+  amount    Decimal      @db.Decimal(10, 2)
+  reason    String
+  refOrderId String?
+  createdAt DateTime     @default(now())
+
+  wallet    Wallet       @relation(fields: [walletId], references: [id], onDelete: Cascade)
+
+  @@index([walletId])
+}
+
+model LoyaltyAccount {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  points    Int      @default(0)
+  tier      String   @default("BRONZE")
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions LoyaltyTransaction[]
+}
+
+model LoyaltyTransaction {
+  id        String        @id @default(cuid())
+  accountId String
+  type      LoyaltyTxType
+  points    Int
+  reason    String
+  createdAt DateTime      @default(now())
+
+  account   LoyaltyAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  @@index([accountId])
+}
+
+model Coupon {
+  id            String     @id @default(cuid())
+  code          String     @unique
+  type          CouponType
+  value         Decimal    @db.Decimal(10, 2)
+  minOrderValue Decimal?   @db.Decimal(10, 2)
+  maxDiscount   Decimal?   @db.Decimal(10, 2)
+  usageLimit    Int?
+  usageCount    Int        @default(0)
+  perUserLimit  Int?       @default(1)
+  startsAt      DateTime
+  expiresAt     DateTime
+  isActive      Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+
+  orders        Order[]
+}
+
+// --------------------------------------------------------------------------
+// INVENTORY
+// --------------------------------------------------------------------------
+
+model InventoryItem {
+  id           String   @id @default(cuid())
+  branchId     String
+  name         String // "Detergent - Powder", "Poly Bag Medium"
+  category     String // "detergent" | "packaging"
+  quantity     Float
+  unit         String // "L", "kg", "pcs"
+  reorderLevel Float    @default(0)
+  updatedAt    DateTime @updatedAt
+
+  branch       Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([branchId])
+}
+
+// --------------------------------------------------------------------------
+// REVIEWS / SUPPORT / NOTIFICATIONS / AUDIT
+// --------------------------------------------------------------------------
+
+model Review {
+  id            String   @id @default(cuid())
+  orderId       String   @unique
+  authorId      String
+  driverRating  Int?
+  serviceRating Int?
+  comment       String?
+  createdAt     DateTime @default(now())
+
+  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  author        User     @relation("ReviewAuthor", fields: [authorId], references: [id])
+}
+
+model SupportTicket {
+  id          String              @id @default(cuid())
+  requesterId String
+  subject     String
+  message     String
+  status      SupportTicketStatus @default(OPEN)
+  orderId     String?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  requester   User                @relation("TicketRequester", fields: [requesterId], references: [id])
+  messages    SupportMessage[]
+}
+
+model SupportMessage {
+  id        String   @id @default(cuid())
+  ticketId  String
+  authorId  String
+  message   String
+  createdAt DateTime @default(now())
+
+  ticket    SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+}
+
+model Notification {
+  id        String              @id @default(cuid())
+  userId    String
+  channel   NotificationChannel
+  title     String
+  body      String
+  status    NotificationStatus  @default(PENDING)
+  meta      Json?
+  readAt    DateTime?
+  createdAt DateTime            @default(now())
+
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String // "ORDER_STATUS_CHANGED", "REFUND_APPROVED", etc.
+  entityType String
+  entityId   String
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  actor      User?    @relation(fields: [actorId], references: [id])
+
+  @@index([entityType, entityId])
+  @@index([actorId])
+}
+
+// --------------------------------------------------------------------------
+// CMS / SETTINGS
+// --------------------------------------------------------------------------
+
+model AppSetting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+model CmsPage {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  title     String
+  content   String   @db.Text
+  isPublished Boolean @default(true)
+  updatedAt DateTime @updatedAt
+}

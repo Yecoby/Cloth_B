@@ -1,0 +1,93 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: laundry
+          POSTGRES_PASSWORD: laundry_test_password
+          POSTGRES_DB: laundry_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+
+    env:
+      DATABASE_URL: postgresql://laundry:laundry_test_password@localhost:5432/laundry_test
+      REDIS_URL: redis://localhost:6379
+      NEXTAUTH_SECRET: test-secret-not-for-production
+      NEXTAUTH_URL: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Prisma generate
+        run: npx prisma generate
+
+      - name: Run migrations
+        run: npx prisma migrate deploy
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: E2E tests
+        run: npx playwright install --with-deps && npm run test:e2e
+        continue-on-error: true # flip to required once E2E suite is fleshed out
+
+  docker-build:
+    needs: lint-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build -f docker/Dockerfile -t laundry-os:${{ github.sha }} .
+
+      # Push to your registry of choice (ECR/GHCR/Docker Hub) — configure secrets:
+      # DOCKER_USERNAME, DOCKER_PASSWORD, REGISTRY_URL
+      - name: Log in to registry
+        if: env.REGISTRY_URL != ''
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login ${{ secrets.REGISTRY_URL }} -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+
+      - name: Push image
+        if: env.REGISTRY_URL != ''
+        run: |
+          docker tag laundry-os:${{ github.sha }} ${{ secrets.REGISTRY_URL }}/laundry-os:${{ github.sha }}
+          docker tag laundry-os:${{ github.sha }} ${{ secrets.REGISTRY_URL }}/laundry-os:latest
+          docker push ${{ secrets.REGISTRY_URL }}/laundry-os:${{ github.sha }}
+          docker push ${{ secrets.REGISTRY_URL }}/laundry-os:latest
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}

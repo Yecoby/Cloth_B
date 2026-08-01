@@ -1,0 +1,94 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: laundry
+      POSTGRES_PASSWORD: laundry_dev_password
+      POSTGRES_DB: laundry_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U laundry -d laundry_db"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-off job: syncs the Prisma schema to Postgres and seeds sample data.
+  # Uses the `builder` stage (not the slim `runner` stage) because that's
+  # the stage that still has the Prisma CLI and tsx available — the final
+  # production image intentionally excludes dev tooling to stay small.
+  migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: builder
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://laundry:laundry_dev_password@postgres:5432/laundry_db?schema=public
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # `db push` syncs schema.prisma straight to the database — the right
+    # tool for an early-stage project before a formal migration history
+    # exists. Once the schema stabilizes, switch to `prisma migrate dev`
+    # (run locally against a live DB) to generate real migration files,
+    # then swap this to `prisma migrate deploy`.
+    command: sh -c "npx prisma db push --skip-generate --accept-data-loss && npx tsx prisma/seed.ts"
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://laundry:laundry_dev_password@postgres:5432/laundry_db?schema=public
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: node server.js
+
+  socket:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.socket
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "3001:3001"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:

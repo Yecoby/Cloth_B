@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+body {
+  background-color: #f6f8f7;
+  color: #122436;
+}
+
+/* Visible keyboard focus everywhere — accessibility floor */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid #2ba6a6;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* --------------------------------------------------------------------
+   Signature element: the laundry claim-ticket stub.
+   Used for the hero, live order tracking, and order history entries.
+   The perforation is a repeating radial-gradient "hole punch" edge,
+   like the tear-line on a real pickup ticket.
+   -------------------------------------------------------------------- */
+.ticket {
+  position: relative;
+  background: #ffffff;
+  border-radius: 18px;
+  box-shadow: 0 1px 2px rgba(18, 36, 54, 0.06), 0 8px 24px rgba(18, 36, 54, 0.08);
+}
+
+.ticket-perforation {
+  height: 14px;
+  background-image: radial-gradient(circle at 12px 0, transparent 6px, #ffffff 6.5px);
+  background-size: 24px 14px;
+  background-repeat: repeat-x;
+  background-position: left top;
+}
+
+.ticket-perforation--floor {
+  background-image: radial-gradient(circle at 12px 14px, transparent 6px, #ffffff 6.5px);
+}
